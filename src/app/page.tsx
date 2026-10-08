@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
+import { calculateSma20Signal, type Sma20Signal } from "@/lib/signals";
 import {
-  TrendingUp,
   BarChart3,
   Brain,
   Shield,
@@ -12,6 +13,8 @@ import {
   ArrowRight,
   Sparkles,
   Check,
+  RefreshCw,
+  AlertCircle,
 } from "lucide-react";
 
 const FEATURES = [
@@ -19,7 +22,7 @@ const FEATURES = [
     icon: LineChart,
     title: "Live Market Data",
     description:
-      "Real-time cryptocurrency prices powered by Kraken exchange. Track 12+ coins with professional-grade charting.",
+      "Cryptocurrency prices powered by CoinGecko. Explore supported coins with professional-grade charting.",
   },
   {
     icon: Brain,
@@ -66,6 +69,135 @@ const COINS = [
   { symbol: "SUI", name: "Sui" },
 ];
 
+type MarketState = {
+  status: "loading" | "ready" | "unavailable";
+  signal: Sma20Signal | null;
+};
+
+const formatPrice = (value: number) => new Intl.NumberFormat("en-US", {
+  style: "currency", currency: "USD", maximumFractionDigits: 2,
+}).format(value);
+
+function BitcoinSignal() {
+  const [market, setMarket] = useState<MarketState>({ status: "loading", signal: null });
+  const [refreshVersion, setRefreshVersion] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function fetchMarket() {
+      try {
+        const response = await fetch("/api/prices?pair=XXBTZUSD&interval=1440&limit=30", {
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("Market request failed");
+        const data = await response.json();
+        const signal = calculateSma20Signal(data?.candles);
+        if (!controller.signal.aborted) {
+          setMarket({ status: signal ? "ready" : "unavailable", signal });
+        }
+      } catch {
+        if (!controller.signal.aborted) setMarket({ status: "unavailable", signal: null });
+      }
+    }
+    void fetchMarket();
+    return () => controller.abort();
+  }, [refreshVersion]);
+
+  const refresh = () => {
+    setMarket({ status: "loading", signal: null });
+    setRefreshVersion((version) => version + 1);
+  };
+
+  const { signal, status } = market;
+  const color = signal?.classification === "Above average" ? "text-emerald-700 [.dark_&]:text-emerald-400"
+    : signal?.classification === "Below average" ? "text-red-700 [.dark_&]:text-red-400" : "text-primary";
+
+  // A minimum range keeps a flat price series visible and avoids division by zero.
+  const closes = signal?.candles.map((candle) => candle.close) ?? [];
+  const min = signal ? Math.min(...closes, signal.sma20) : 0;
+  const max = signal ? Math.max(...closes, signal.sma20) : 0;
+  const padding = Math.max((max - min) * 0.15, max * 0.001);
+  const range = max - min + padding * 2;
+  const toY = (price: number) => 170 - ((price - min + padding) / range) * 160;
+  const points = closes.map((price, index) => `${10 + (index / 19) * 400},${toY(price)}`).join(" ");
+  const dateLabel = (time: number) => new Date(time * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+
+  return (
+    <figure className="min-w-0 rounded-2xl border border-primary/15 bg-gradient-to-br from-primary/10 via-muted/60 to-accent/10 p-4 sm:p-6">
+      <div className="rounded-xl border border-border bg-card p-4 shadow-sm sm:p-5">
+        <div className="flex items-center justify-between gap-3 border-b border-border pb-4">
+          <div className="flex items-center gap-3">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-sm font-bold text-primary">B</span>
+            <div>
+              <p className="text-sm font-semibold text-foreground">Bitcoin</p>
+              <p className="text-xs text-muted-foreground">BTC / USD</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={refresh}
+            disabled={status === "loading"}
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted disabled:cursor-wait disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          >
+            <RefreshCw className="size-3.5" aria-hidden="true" />
+            {status === "unavailable" ? "Retry" : "Refresh"}
+          </button>
+        </div>
+
+        <div aria-live="polite" aria-atomic="true" aria-busy={status === "loading"} className="min-h-[300px] pt-5">
+          <h2 className="text-sm font-semibold text-foreground">Price versus SMA20</h2>
+          {status === "loading" && (
+            <div className="flex min-h-[270px] flex-col items-center justify-center gap-3 text-sm text-muted-foreground" role="status">
+              <LineChart className="size-8 text-primary" aria-hidden="true" />
+              Loading Bitcoin market data…
+            </div>
+          )}
+          {status === "unavailable" && (
+            <div className="flex min-h-[270px] flex-col items-center justify-center gap-3 text-center">
+              <AlertCircle className="size-8 text-muted-foreground" aria-hidden="true" />
+              <p className="text-sm font-semibold text-foreground">Unavailable</p>
+              <p className="max-w-xs text-sm leading-relaxed text-muted-foreground">We need 20 valid candles to calculate this signal. Market data could not be loaded or is incomplete.</p>
+              <button type="button" onClick={refresh} className="min-h-11 rounded-lg border border-border px-4 text-sm font-medium text-foreground hover:bg-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">Try again</button>
+            </div>
+          )}
+          {status === "ready" && signal && (
+            <>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                <span className={`rounded-full bg-muted px-3 py-1.5 text-xs font-semibold ${color}`}>{signal.classification}</span>
+                <span className={`text-sm font-semibold tabular-nums ${color}`}>{signal.deviation > 0 ? "+" : ""}{signal.deviation.toFixed(2)}% vs SMA20</span>
+              </div>
+              <svg viewBox="0 0 420 180" className="mt-4 w-full text-primary" role="img" aria-labelledby="bitcoin-signal-chart-title">
+                <title id="bitcoin-signal-chart-title">Bitcoin closing prices for the latest 20 candles, compared with their average of {formatPrice(signal.sma20)}.</title>
+                {[10, 50, 90, 130, 170].map((y) => <line key={y} x1="10" y1={y} x2="410" y2={y} stroke="currentColor" strokeOpacity="0.1" />)}
+                <line x1="10" y1={toY(signal.sma20)} x2="410" y2={toY(signal.sma20)} stroke="var(--accent)" strokeWidth="2" strokeDasharray="6 5" />
+                <polyline points={points} fill="none" stroke="currentColor" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
+                <circle cx="410" cy={toY(signal.latestClose)} r="4" fill="currentColor" />
+              </svg>
+              <div className="mt-1 flex justify-between text-xs text-muted-foreground">
+                <span>{dateLabel(signal.candles[0].time)}</span><span>{dateLabel(signal.timestamp)}</span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-4 text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-4 bg-primary" /> Closing price</span>
+                <span className="inline-flex items-center gap-1.5"><span className="w-4 border-t-2 border-dashed border-accent" /> SMA20 reference</span>
+              </div>
+              <dl className="mt-4 grid grid-cols-2 gap-3 border-t border-border pt-4">
+                <div className="min-w-0 rounded-lg bg-muted/70 p-3"><dt className="text-xs text-muted-foreground">Latest close</dt><dd className="mt-1 break-words text-base font-semibold tabular-nums text-foreground sm:text-lg">{formatPrice(signal.latestClose)}</dd></div>
+                <div className="min-w-0 rounded-lg bg-muted/70 p-3"><dt className="text-xs text-muted-foreground">20-candle average</dt><dd className="mt-1 break-words text-base font-semibold tabular-nums text-foreground sm:text-lg">{formatPrice(signal.sma20)}</dd></div>
+              </dl>
+              <p className="mt-3 text-xs leading-relaxed text-muted-foreground">Latest candle: <time dateTime={new Date(signal.timestamp * 1000).toISOString()}>{new Date(signal.timestamp * 1000).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}</time></p>
+            </>
+          )}
+        </div>
+      </div>
+      <figcaption className="mt-3 space-y-1 text-center text-xs leading-relaxed text-muted-foreground">
+        <p>20 returned candles · Candle spacing may vary.</p>
+        <p>±1% is near average. An indicator, not a buy/sell recommendation.</p>
+        <p>CoinGecko · Market data may be cached for 60 seconds.</p>
+      </figcaption>
+    </figure>
+  );
+}
+
 export default function LandingPage() {
   return (
     <div className="min-h-screen">
@@ -107,56 +239,7 @@ export default function LandingPage() {
               </div>
             </div>
 
-            <figure className="min-w-0 rounded-2xl border border-primary/15 bg-gradient-to-br from-primary/10 via-muted/60 to-accent/10 p-4 sm:p-6">
-              <div className="rounded-xl border border-border bg-card p-4 shadow-sm sm:p-5">
-                <div className="flex items-center justify-between gap-3 border-b border-border pb-4">
-                  <div className="flex items-center gap-3">
-                    <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-sm font-bold text-primary">B</span>
-                    <div>
-                      <p className="text-sm font-semibold text-foreground">Bitcoin</p>
-                      <p className="text-xs text-muted-foreground">BTC / USD</p>
-                    </div>
-                  </div>
-                  <span className="rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">Preview</span>
-                </div>
-                <div className="mt-5 flex items-center justify-between gap-3">
-                  <p className="text-sm font-medium text-foreground">Market overview</p>
-                  <span className="inline-flex items-center gap-1 text-xs font-medium text-primary"><TrendingUp className="size-3.5" aria-hidden="true" /> Price + forecast</span>
-                </div>
-                <svg viewBox="0 0 420 180" className="mt-4 w-full text-primary" role="img" aria-labelledby="market-preview-title">
-                  <title id="market-preview-title">Illustrative price chart with a dashed forecast. This is not live market data.</title>
-                  <defs>
-                    <linearGradient id="market-preview-fill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="currentColor" stopOpacity="0.18" />
-                      <stop offset="100%" stopColor="currentColor" stopOpacity="0" />
-                    </linearGradient>
-                  </defs>
-                  {[35, 80, 125, 170].map((y) => <line key={y} x1="0" y1={y} x2="420" y2={y} stroke="currentColor" strokeOpacity="0.1" />)}
-                  <path d="M0 140 L25 125 L50 132 L75 105 L100 117 L125 90 L150 97 L175 67 L200 82 L225 58 L250 66 L275 40 L290 48 L290 180 L0 180 Z" fill="url(#market-preview-fill)" />
-                  <path d="M0 140 L25 125 L50 132 L75 105 L100 117 L125 90 L150 97 L175 67 L200 82 L225 58 L250 66 L275 40 L290 48" fill="none" stroke="currentColor" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
-                  <line x1="290" y1="10" x2="290" y2="170" stroke="currentColor" strokeOpacity="0.25" strokeDasharray="4 5" />
-                  <path d="M290 48 L315 40 L340 47 L365 25 L390 31 L420 15" fill="none" stroke="var(--accent)" strokeWidth="3" strokeDasharray="6 6" strokeLinecap="round" />
-                  <circle cx="290" cy="48" r="5" fill="currentColor" stroke="var(--card)" strokeWidth="3" />
-                </svg>
-                <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
-                  <span>Price history</span>
-                  <span>7-day forecast</span>
-                </div>
-                <div className="mt-5 grid grid-cols-2 gap-3 border-t border-border pt-4">
-                  <div className="rounded-lg bg-muted/70 p-3">
-                    <Brain className="mb-2 size-4 text-primary" aria-hidden="true" />
-                    <p className="text-xs font-semibold text-foreground">AI forecasts</p>
-                    <p className="mt-1 text-xs text-muted-foreground">Multiple model perspectives</p>
-                  </div>
-                  <div className="rounded-lg bg-muted/70 p-3">
-                    <BarChart3 className="mb-2 size-4 text-primary" aria-hidden="true" />
-                    <p className="text-xs font-semibold text-foreground">Technical indicators</p>
-                    <p className="mt-1 text-xs text-muted-foreground">Context behind each move</p>
-                  </div>
-                </div>
-              </div>
-              <figcaption className="mt-3 text-center text-xs text-muted-foreground">Illustrative preview · Not live market data</figcaption>
-            </figure>
+            <BitcoinSignal />
           </div>
         </div>
       </section>
